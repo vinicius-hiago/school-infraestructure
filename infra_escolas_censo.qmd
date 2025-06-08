@@ -93,7 +93,7 @@ final_base_raw <- left_join(
 
 ## Index
 
-A composite infrastructure index was built for each school using a **2-Parameter Logistic Item Response Theory** (IRT) model. The final scores were then standardized to a scale with a mean of 50 and a standard deviation of 10. The index incorporates the following variables:
+A composite infrastructure index was built for each school using a **2-Parameter Logistic Item Response Theory** (IRT) model. The final scores were then standardized to a scale with a mean of 50 and a standard deviation of 10. A higher index value corresponds to a better school infraestructure quality. The index incorporates
 
 > esgoto_rede_publica, agua_potavel, energia_inexistente, banheiro_pne, biblioteca, cozinha, laboratorio_ciencias, laboratorio_informatica, quadra_esportes, sala_diretoria, sala_leitura, sala_atendimento_especial, equipamento_computador, equipamento_copiadora, equipamento_impressora, equipamento_tv, banda_larga.
 
@@ -129,7 +129,7 @@ final_base_sf <- final_base_raw %>%
 
 ## Geographic Boundaries
 
-Official geographic boundaries for municipality and **IBGE's Weighting Areas** were sourced using the R package `geobr`.
+Official geographic boundaries for municipality and **IBGE's Weighting Areas** were sourced using the R package `geobr`. The value shown for each region is the mean of the schools' index located whitin that Weighting Area.
 
 ```{r}
 #| echo: true
