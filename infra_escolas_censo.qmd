@@ -1,0 +1,207 @@
+---
+title: "School Infrastructure in São Paulo"
+author: "Vinicius Hiago e Silva Gerônimo"
+date: "today"
+format:
+  html:
+    mainfont: Playfair Display
+    sansfont: Playfair Display
+    highlight: tango        # Estilo de cor para o código
+    toc: true               # Tabela de Conteúdo (Sumário)
+    toc-location: left      # Posição do Sumário
+    toc-float: true         # Faz o Sumário "flutuar"
+    code-fold: true         # A MÁGICA: Habilita o botão para esconder/mostrar código
+    code-summary: "Show Code"
+---
+
+#### The following map shows the distribution of a infrastructure quality index in São Paulo.
+
+```{r setup}
+#| echo: false
+#| warning: false
+#| include: false
+#| message: false
+
+
+packages <- c("dplyr", "ggplot2", "basedosdados", "sf", "geobr", "osmdata",
+             "tidyverse", "data.table", "mirt", "readxl",
+             "showtext", "scales", "knitr")
+
+for (pck in packages) {
+  if (!requireNamespace(pck, quietly = TRUE)) {
+    install.packages(pck)
+  }
+}
+lapply(packages, library, character.only = TRUE)
+
+# Load font for plotting
+font_add_google(name = 'Playfair Display', family = 'pf')
+showtext_auto()
+```
+
+## School Infrastructure Data
+
+School-level data was obtained from the **2024 School Census**, accessed via the **Base dos Dados** organization's datalake. The analysis focuses on active schools with reported high school enrollment.
+
+```{r}
+#| echo: true
+#| message: false
+#| warning: false
+
+# Set the billing ID and the municipality code
+basedosdados::set_billing_id('vinicius-projetos-r')
+mun_code <- '3550308'
+
+# Query to download infrastructure data from the School Census
+census_query = paste("
+SELECT 
+  id_escola, esgoto_rede_publica, agua_potavel, energia_inexistente,
+  banheiro_pne, biblioteca, cozinha, laboratorio_ciencias, laboratorio_informatica,
+  quadra_esportes, sala_diretoria, sala_leitura, sala_atendimento_especial,
+  equipamento_computador, equipamento_copiadora, equipamento_impressora,
+  equipamento_tv, banda_larga
+FROM `basedosdados.br_inep_censo_escolar.escola`
+WHERE ano = 2024 AND id_municipio = '", mun_code,"' AND tipo_situacao_funcionamento = '1' AND etapa_ensino_medio = 1
+", sep="")
+
+census_base = as.data.frame(basedosdados::read_sql(
+    query = gsub("\\s+", " ", census_query)))
+
+for (col in c(2:dim(census_base)[2])){
+  census_base[,col] = as.numeric(census_base[,col])
+}
+```
+
+## Geolocation
+
+School locations were determined by their latitude and longitude coordinates, sourced from Inep's **Catálogo das Escolas** (School Catalog).
+
+```{r}
+#| echo: true
+#| message: false
+#| warning: false
+#| code-fold: false
+
+school_geoloc <- readxl::read_xlsx("Coordenadas_escolas.xlsx")
+
+final_base_raw <- left_join(
+  x = census_base,
+  y = school_geoloc %>% select(c(Código, Escola, Latitude, Longitude)),
+  by = c('id_escola' = 'Código')) %>%
+  filter(!is.na(Latitude), !is.na(Longitude))
+```
+
+## Index
+
+A composite infrastructure index was built for each school using a **2-Parameter Logistic Item Response Theory** (IRT) model. The final scores were then standardized to a scale with a mean of 50 and a standard deviation of 10. The index incorporates the following variables:
+
+> esgoto_rede_publica, agua_potavel, energia_inexistente, banheiro_pne, biblioteca, cozinha, laboratorio_ciencias, laboratorio_informatica, quadra_esportes, sala_diretoria, sala_leitura, sala_atendimento_especial, equipamento_computador, equipamento_copiadora, equipamento_impressora, equipamento_tv, banda_larga.
+
+```{r}
+#| echo: true
+#| message: false
+#| warning: false
+#| code-fold: false
+
+irt = mirt(final_base_raw %>% 
+             select(-c(id_escola, Escola, Latitude, Longitude)) %>%
+             select(where(~ n_distinct(.)>1)),
+     model = 1,
+     itemtype = '2PL',
+     verbose = F)
+
+raw_index <- fscores(irt, method = 'EAP') * -1
+
+# Standardized index
+final_index_df <- as.data.frame(raw_index) %>%
+  mutate(
+    final_index = 50 + (10 * (F1 - mean(F1)) / sd(F1))
+  )
+
+
+final_base_sf <- final_base_raw %>%
+  mutate(infra_index = final_index_df$final_index) %>%
+  st_as_sf(
+    coords = c("Longitude", "Latitude"),
+    crs = 4674 # SIRGAS 2000
+  )
+```
+
+## Geographic Boundaries
+
+Official geographic boundaries for municipality and **IBGE's Weighting Areas** were sourced using the R package `geobr`.
+
+```{r}
+#| echo: true
+#| message: false
+#| warning: false
+
+estate = lookup_muni(code_muni = as.character(mun_code))$name_state
+muni = lookup_muni(code_muni = as.character(mun_code))$name_muni
+
+# Get municipalitie's boundaries 
+muni_boundary = read_municipality(code_muni = mun_code)
+
+# Get weighting area's boundaries
+weighting_areas = read_weighting_area() %>%
+  filter(code_muni == mun_code)
+
+# Join tables
+schools_in_areas <- st_join(final_base_sf, weighting_areas, join = st_intersects)
+
+# Calculate the mean index of each weighting area
+areas_with_index <- left_join(
+  weighting_areas,
+  schools_in_areas %>% 
+    st_drop_geometry() %>%
+    group_by(code_weighting) %>% 
+    summarise(
+      mean_area = mean(infra_index, na.rm = TRUE),
+      n_schools = n()
+    ) %>%
+    ungroup(),
+  by = 'code_weighting'
+)
+```
+
+## Maps
+
+There is a greater concentration of schools with better infrastructure in São Paulo's central areas, whereas the worst-performing averages are located on the city's periphery. The map illustrates that the drop in infrastructure quality is often gradual.
+
+```{r plotar-mapa-final}
+#| echo: true
+#| message: false
+#| warning: false
+#| fig.width: 16
+#| fig.height: 14
+
+min_val <- min(areas_with_index$mean_area, na.rm = TRUE)
+max_val <- max(areas_with_index$mean_area, na.rm = TRUE)
+
+ggplot() +
+  geom_sf(data = areas_with_index, aes(fill=mean_area), color = "white", linewidth = 0.2) +
+  scale_fill_distiller(
+    name = "",
+    palette = "PRGn",
+    direction = 1,
+    na.value = "grey",
+    limits = c(min_val, max_val),
+    breaks = c(min_val, max_val),
+    labels = label_number(accuracy = 1)) +
+  geom_sf(data = muni_boundary, fill = NA, color = "white", linewidth = 0.5) +
+  labs(
+    title = "The Quality of School Infrastructure",
+    subtitle = paste("Distribution of infrastructure levels in", muni),
+    caption = "Fonte: Censo Escolar 2024; Base dos Dados."
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(family = "pf", size = 100, face = "bold", color = "#222222", hjust = 0.5),
+    plot.subtitle = element_text(family = "pf", size = 50, color = "#555555", hjust = 0.5),
+    legend.text = element_text(family = "pf", size = 45),
+    plot.caption = element_text(family = "pf", size = 40, hjust = 0.5),
+    legend.position = 'bottom',
+    legend.key.width = unit(1.8, "cm"),
+    legend.key.size= unit(0.7, "cm")
+  )
+```
